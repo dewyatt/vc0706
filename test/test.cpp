@@ -32,39 +32,76 @@ void sleepms(unsigned int ms)
     usleep(ms * 1000);
 }
 
-void save_picture(const char *filename)
-{
+void cmd_tv() {
+    cam.tv_off();
+    printf("TV output OFF\n");
+    sleepms(2000);
+    cam.tv_on();
+    printf("TV output ON\n");
+    sleepms(2000);
     cam.freeze_picture();
+    printf("Picture frozen...\n");
+    sleepms(2000);
+    for (int i = 0; i < 3; i++) {
+        cam.step_picture();
+        printf("Step frame...\n");
+        sleepms(1000);
+    }
+    cam.resume_picture();
+    printf("Picture resumed...\n");
+}
+
+void cmd_motion() {
+    cam.motion_detect_on();
+    printf("Kill with ctrl+c...\n");
+    while (true) {
+        sleepms(100);
+        if (cam.motion_detected())
+            putc('+', stdout);
+        else
+            putc('.', stdout);
+
+        fflush(stdout);
+    }
+}
+
+void cmd_picture() {
+    cam.freeze_picture();
+    printf("Saving picture (%d bytes)...", cam.get_picture_size());
+    fflush(stdout);
     const VC0706::DataBuffer& data = cam.read_picture();
     cam.resume_picture();
 
-    std::ofstream outf(filename, std::ios::binary);
+    std::ofstream outf("picture.jpg", std::ios::binary);
     outf.write((char*)&data[0], data.size());
     outf.close();
 }
 
 int main(int argc, char *argv[])
 {
-    if ( argc != 3 ) {
-        printf("Usage: %s <port> <baud>\n\n", argv[0]);
+    if ( argc != 4 ) {
+        printf("Usage: %s <port> <baud> <command>\n", argv[0]);
+        printf("\tport - /dev/ttyS0, etc\n");
+        printf("\tbaud - baud rate (try 38400)\n");
+        printf("\tcommand - tv, motion, picture\n");
         printf("Example:\n");
-        printf("\t%s /dev/ttyS0 38400\n", argv[0]);
+        printf("\t%s /dev/ttyS0 38400 motion\n", argv[0]);
         return 1;
     }
     cam.open(argv[1], atoi(argv[2]));
-    printf("Version: %s\n", cam.get_version().c_str());
-    printf ("Compression: %d\n", cam.get_compression());
+    printf("Firmware version: %s\n", cam.get_version().c_str());
 
-    cam.tv_on();
-    cam.motion_detect_on();
-    while (true) {
-        sleepms(100);
-        if (cam.motion_detected()) {
-            printf("Motion detected\n");
-            cam.motion_detect_off();
-            save_picture("capture.jpg");
-            cam.motion_detect_on();
-        }
+    if ( strcmp(argv[3], "tv") == 0 )
+        cmd_tv();
+    else if ( strcmp(argv[3], "motion") == 0 )
+        cmd_motion();
+    else if ( strcmp(argv[3], "picture") == 0 )
+        cmd_picture();
+    else {
+        printf("Invalid command: %s\n", argv[1]);
+        return 1;
     }
+    printf("Done\n");
+    return 0;
 }
 
