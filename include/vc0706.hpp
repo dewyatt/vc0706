@@ -60,6 +60,7 @@ public:
 
     //Freeze, step, and resume the framebuffer.
     void freeze_picture();
+    uint32_t get_picture_size();
     void step_picture();
     void resume_picture();
     //Read the frame (must call freeze_picture first)
@@ -104,7 +105,8 @@ private:
     DataBuffer my_image_buffer;
 
     void send_command(uint8_t command, uint8_t args[] = 0, uint8_t arg_count = 0);
-    bool read_response(uint8_t command, unsigned int ms = 50, bool timeout_allowed = false);
+    bool read_response(uint8_t command, unsigned int ms = 50, bool timeout_allowed = false, bool ignore_motion = true);
+    bool read_io(uint8_t *buff, unsigned int length, unsigned int ms, bool read);
     bool read_timeout(uint8_t *buffer, unsigned int length, unsigned int ms);
     bool write_timeout(uint8_t *buffer, unsigned int length, unsigned int ms);
     uint32_t get_fbuf_len();

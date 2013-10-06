@@ -70,9 +70,9 @@ const uint8_t TVOutStop = 0x00;
 
 const uint8_t FBufStopCurrentFrame = 0x00;
 const uint8_t FBufStopNextFrame = 0x01;
-//These are incorrectly swapped in the datasheet
-const uint8_t FBufResumeFrame = 0x03;
+//These two are swapped in the datasheet
 const uint8_t FBufStepFrame = 0x02;
+const uint8_t FBufResumeFrame = 0x03;
 
 const uint8_t CurrentFrame = 0x00;
 const uint8_t NextFrame = 0x01;
@@ -135,10 +135,6 @@ void VC0706::set_baud_rate(unsigned int rate)
     }
     send_command(CommandSetPort, args, sizeof(args));
     my_port.set_option(serial_port::baud_rate(rate));
-    /*
-    NOTE: Currently this function will cause errors later on.
-    It's better to keep whatever rate you are already at (set it in EEPROM if you must and restart).
-    */
 }
 
 std::string VC0706::get_version()
@@ -178,6 +174,11 @@ void VC0706::freeze_picture()
 {
     uint8_t args[] = {FBufStopCurrentFrame};
     send_command(CommandFBufCtrl, args, sizeof(args));
+}
+
+uint32_t VC0706::get_picture_size()
+{
+    return get_fbuf_len();
 }
 
 void VC0706::step_picture()
@@ -258,7 +259,8 @@ void VC0706::motion_detect_off()
 
 bool VC0706::motion_detected()
 {
-    if (read_response(0x39, 200, true))
+    /* wait up to 1ms */
+    if (read_response(0x39, 1, true, false))
         return true;
 
     return false;
@@ -279,28 +281,37 @@ void VC0706::send_command(uint8_t command, uint8_t args[], uint8_t arg_count)
     read_response(command);
 }
 
-bool VC0706::read_response(uint8_t command, unsigned int ms, bool timeout_allowed)
+bool VC0706::read_response(uint8_t command, unsigned int ms, bool timeout_allowed, bool ignore_motion)
 {
-    if (!read_timeout((uint8_t *)&my_response, 5, ms)) {
-        if (timeout_allowed)
-            return false;
-        else
-            throw std::runtime_error("Read timeout");
-    }
-    uint8_t expected[] = {0x76, SerialNumber, command, StatusOk};
-    if (memcmp(&my_response, expected, 4) != 0) {
-        uint8_t *p = (uint8_t *)&my_response;
-        for (int i = 0; i < 5; ++i) {
-            printf ("%02X ", *p++);
+    while (true) {
+        if (!read_timeout((uint8_t *)&my_response, 5, ms)) {
+            if (timeout_allowed)
+                return false;
+            else
+                throw std::runtime_error("Read timeout");
         }
-        printf("\n");
-        p = expected;
-        printf("expected:\n");
-        for (int i = 0; i < 5; ++i) {
-            printf ("%02X ", *p++);
+        uint8_t motion_detected[] = {0x76, SerialNumber, 0x39, 0x00};
+        //We may receive motion detection responses at any time.
+        //We ignore them here unless instructed not to.
+        if (memcmp(&my_response, motion_detected, 4) == 0 && ignore_motion)
+            continue;
+
+        uint8_t expected[] = {0x76, SerialNumber, command, StatusOk};
+        if (memcmp(&my_response, expected, 4) != 0) {
+            uint8_t *p = (uint8_t *)&my_response;
+            for (int i = 0; i < 5; ++i) {
+                printf ("%02X ", *p++);
+            }
+            printf("\n");
+            p = expected;
+            printf("expected:\n");
+            for (int i = 0; i < 5; ++i) {
+                printf ("%02X ", *p++);
+            }
+            printf("\n");
+            throw std::runtime_error("Unexpected response");
         }
-        printf("\n");
-        throw std::runtime_error("Unexpected response");
+        break;
     }
     if (my_response.data_length > 20)
         throw std::runtime_error("Data length exceeded");
@@ -314,66 +325,49 @@ bool VC0706::read_response(uint8_t command, unsigned int ms, bool timeout_allowe
     return true;
 }
 
-void set_result(boost::optional<boost::system::error_code> *a, boost::system::error_code b)
-{
-    a->reset(b);
+void handle_timer(bool *timeout, boost::system::error_code ec) {
+    if (ec != boost::asio::error::operation_aborted)
+        *timeout = true;
+}
+
+void handle_rw(bool *done, boost::system::error_code *e, boost::system::error_code ec) {
+    *done = true;
+    *e = ec;
+}
+
+bool VC0706::read_io(uint8_t *buff, unsigned int length, unsigned int ms, bool read) {
+    bool timeout = false;
+    bool rw_done = false;
+    boost::system::error_code ec;
+
+    boost::asio::deadline_timer deadline(my_io_service);
+    deadline.expires_from_now(boost::posix_time::milliseconds(ms));
+    deadline.async_wait(boost::bind(&handle_timer, &timeout, _1));
+
+    if (read)
+        async_read(my_port, buffer(buff, length), boost::bind(&handle_rw, &rw_done, &ec, _1));
+    else
+        async_write(my_port, buffer(buff, length), boost::bind(&handle_rw, &rw_done, &ec, _1));
+
+    my_io_service.reset();
+    while (my_io_service.run_one()) {
+        if (rw_done) {
+            deadline.cancel();
+        } else if (timeout) {
+            my_port.cancel();
+        }
+    }
+    return !timeout && !ec;
 }
 
 bool VC0706::read_timeout(uint8_t *buff, unsigned int length, unsigned int ms)
 {
-    boost::optional<boost::system::error_code> timer_result;
-    boost::asio::deadline_timer deadline(my_io_service);
-    deadline.expires_from_now(boost::posix_time::milliseconds(ms));
-    deadline.async_wait(boost::bind(&set_result, &timer_result, _1));
-    boost::optional<boost::system::error_code> read_result;
-    async_read(my_port, buffer(buff, length), boost::bind(&set_result, &read_result, _1));
-    my_io_service.reset();
-    while (my_io_service.run_one()) {
-        if (read_result) {
-            deadline.cancel();
-            my_io_service.run();
-        }
-        else if (timer_result) {
-            my_port.cancel();
-            return false;
-        }
-    }
-    if (read_result && *read_result) {
-        throw std::runtime_error("I/O error");
-    }
-    if (timer_result)
-        return *timer_result;
-
-    return true;
+    return read_io(buff, length, ms, true);
 }
 
 bool VC0706::write_timeout(uint8_t *buff, unsigned int length, unsigned int ms)
 {
-    boost::optional<boost::system::error_code> timer_result;
-    boost::asio::deadline_timer deadline(my_io_service);
-    deadline.expires_from_now(boost::posix_time::milliseconds(ms));
-    deadline.async_wait(boost::bind(&set_result, &timer_result, _1));
-    boost::optional<boost::system::error_code> write_result;
-    async_write(my_port, buffer(buff, length), boost::bind(&set_result, &write_result, _1));
-    my_io_service.reset();
-    while (my_io_service.run_one()) {
-        if (write_result) {
-            deadline.cancel();
-            my_io_service.run();
-        }
-        else if (timer_result) {
-            my_port.cancel();
-            my_io_service.run();
-            return false;
-        }
-    }
-    if (write_result && *write_result) {
-        throw std::runtime_error("I/O error");
-    }
-    if (timer_result)
-        return *timer_result;
-
-    return true;
+    return read_io(buff, length, ms, false);
 }
 
 uint32_t VC0706::get_fbuf_len()
